@@ -1,6 +1,6 @@
 # Hermes Web CLIs
 
-Bundle of 7 AI-agent-native CLIs for web AI platforms — no API keys needed.
+Bundle of 8 AI-agent-native CLIs for web AI platforms — no API keys needed.
 Each CLI authenticates via browser cookies and returns token-efficient JSON pointer output.
 
 ## Quick Start
@@ -50,6 +50,14 @@ render responses in virtualized DOM containers invisible in headless mode.
 These platforms work with Firefox cookies injected into a fresh headless Chromium per query.
 No persistent browser needed.
 
+### Tier 4: Playwright Standalone with Persistent Profile (Gemini)
+gem-pw.py launches its own Chromium per call with a persistent profile at
+`~/.gemini-cli/cr-profile/`. Sign in once via `gem-pw-login`, then all subsequent
+calls reuse the session. No CDP server needed — each call is self-contained.
+Supports Gem CRUD (create, edit, delete), file uploads, image generation,
+knowledge management (files, GitHub repos, photos, folders), model selection,
+and extended thinking with configurable timeouts.
+
 ## Platforms
 
 | # | CLI | Platform | Auth Source | Approach | Latency |
@@ -61,6 +69,7 @@ No persistent browser needed.
 | 5 | `kimi.py` | kimi.com | Chrome CDP profile | CDP | ~10s |
 | 6 | `minimax.py` | agent.minimax.io | Chrome CDP profile | CDP (headed) | ~4s |
 | 7 | `chatgpt.py` | chatgpt.com | Chrome CDP profile | CDP (headed) | ~3s |
+| 8 | `gem-pw.py` | gemini.google.com | Chrome CDP profile | Playwright standalone | ~5-15s |
 
 ## CDP Server
 
@@ -125,6 +134,7 @@ Open each platform in Firefox/Chrome and sign in:
 - https://kimi.com (Chrome)
 - https://agent.minimax.io (Chrome)
 - https://chatgpt.com (Chrome)
+- https://gemini.google.com (Chrome — sign in once, session persists)
 
 ### Step 2: Extract cookies / create CDP profile
 

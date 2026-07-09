@@ -1,6 +1,6 @@
 # AGENTS.md — AI Agent Instructions
 
-You are an AI agent with access to this repository of 7 AI web CLIs.
+You are an AI agent with access to this repository of 8 AI web CLIs.
 Use these CLIs to query web AI platforms without API keys.
 
 ## When to Use
@@ -37,6 +37,7 @@ $PY $CLI "prompt"
 | agent.minimax.io | `cli/minimax.py` | Yes (headed) | Multi-agent, thinking |
 | aistudio.xiaomimimo.com | `cli/mimo.py` | No | Multimodal |
 | chatgpt.com | `cli/chatgpt.py` | Yes (headed) | General purpose |
+| gemini.google.com | `cli/gem-pw.py` | No | Gem CRUD, knowledge mgmt, extended thinking |
 
 ## Prerequisites Check
 
@@ -70,6 +71,8 @@ python scripts/cdp_server.py stop
 | Cloudflare "Just a moment" | Headless detected | Use `--headed` flag on CDP server |
 | EPIPE crash | Node.js v24 | CDP server handles this; for standalone, suppress stderr on cleanup |
 | Empty response | Wrong DOM selectors | Check `skills/<name>.md` for current selectors |
+| `EMPTY` after 200 polls | Extended thinking slow | Use `-t 600` for large knowledge bases |
+| Profile lock / `SingletonLock` | Stale Chrome process | Kill Chrome, gem-pw auto-cleans locks |
 
 ## Integration with Hermes Agent
 
