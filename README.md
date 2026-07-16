@@ -31,14 +31,15 @@ Two approaches, chosen per platform:
 | Approach | Platforms | Latency | Auth |
 |----------|-----------|---------|------|
 | **HTTP API** | Claude | ~5s | Firefox `sessionKey` cookie |
-| **CDP (Chrome DevTools Protocol)** | Qwen, Kimi, Minimax, ChatGPT | 3-20s | Persistent Chrome profile |
+| **CDP (Chrome DevTools Protocol)** | Qwen, Minimax, ChatGPT | 3-20s | Persistent Chrome profile (headed daemon) |
+| **Playwright native profile** | Kimi | 3-15s | `--login` reusable Chrome profile (no CDP) |
 | **Playwright standalone** | Grok, MiMo | 2-15s | Firefox cookies injected into Chromium |
 
 ### Tier 1: HTTP API (Claude)
 Claude exposes an internal API at `claude.ai/api/organizations/{org}/chat_conversations/{id}/completion`.
 The CLI extracts the `sessionKey` cookie from Firefox and calls this endpoint directly.
 
-### Tier 2: CDP Browser (Qwen, Kimi, Minimax, ChatGPT)
+### Tier 2: CDP Browser (Qwen, Minimax, ChatGPT)
 These platforms use aggressive anti-bot protection (Cloudflare, Akamai, Alibaba WAF).
 A long-lived headed Chromium instance runs as a daemon with `--remote-debugging-port=9223`.
 CLIs connect via Playwright's `connect_over_cdp()`.
@@ -66,7 +67,7 @@ and extended thinking with configurable timeouts.
 | 2 | `grok.py` | grok.com | Firefox sso cookie | Playwright standalone | ~2s |
 | 3 | `mimo.py` | aistudio.xiaomimimo.com | Firefox cookies | Playwright standalone | ~12s |
 | 4 | `qwen.py` | chat.qwen.ai | Chrome CDP profile | CDP | ~18s |
-| 5 | `kimi.py` | kimi.com | Chrome CDP profile | CDP | ~10s |
+| 5 | `kimi.py` | kimi.com | `--login` native profile | Playwright native profile | ~10s |
 | 6 | `minimax.py` | agent.minimax.io | Chrome CDP profile | CDP (headed) | ~4s |
 | 7 | `chatgpt.py` | chatgpt.com | Chrome CDP profile | CDP (headed) | ~3s |
 | 8 | `gem-pw.py` | gemini.google.com | Chrome CDP profile | Playwright standalone | ~5-15s |
@@ -143,9 +144,10 @@ Open each platform in Firefox/Chrome and sign in:
 python cli/claude.py --save-all    # extract Firefox sessionKey
 python cli/grok.py --save-auth     # extract Firefox sso cookie
 python cli/mimo.py --login         # extract Firefox cookies
+python cli/kimi.py --login         # headed Chrome: sign in once, reuse profile
 ```
 
-**For CDP platforms (Qwen, Kimi, Minimax, ChatGPT):**
+**For CDP platforms (Qwen, Minimax, ChatGPT):**
 ```bash
 python scripts/cdp_server.py login  # opens visible Chrome, log in, close when done
 ```

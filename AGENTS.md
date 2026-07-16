@@ -33,7 +33,7 @@ $PY $CLI "prompt"
 | claude.ai | `cli/claude.py` | No | Fast, reliable, coding |
 | grok.com | `cli/grok.py` | No | Fastest (~2s), concise |
 | chat.qwen.ai | `cli/qwen.py` | Yes | Chinese, reasoning |
-| kimi.com | `cli/kimi.py` | Yes | Chinese, long-form |
+| kimi.com | `cli/kimi.py` | No (native `--login` profile) | Chinese, long-form, file/image upload |
 | agent.minimax.io | `cli/minimax.py` | Yes (headed) | Multi-agent, thinking |
 | aistudio.xiaomimimo.com | `cli/mimo.py` | No | Multimodal |
 | chatgpt.com | `cli/chatgpt.py` | Yes (headed) | General purpose |

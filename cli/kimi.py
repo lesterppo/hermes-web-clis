@@ -9,9 +9,17 @@ Setup:
 
 Usage:
   python kimi.py "prompt"
-  python kimi.py -m kimi-k1.5 "prompt"
+  python kimi.py -m kimi-k3 "prompt"          # K3 · Max (default, latest flagship)
+  python kimi.py -m kimi-k3-swarm "prompt"    # K3 Swarm · Max
+  python kimi.py -m kimi-k2.6 "prompt"        # K2.6 · Fast
   python kimi.py --account label "prompt"
   python kimi.py -c chat.json "Turn 1" && python kimi.py -c chat.json "Turn 2"
+
+Models (slug -> exact UI label; the picker only matches labels, not slugs):
+  kimi-k3       -> "K3 · Max"          (default — flagship Chat & Agent all-rounder)
+  kimi-k3-swarm -> "K3 Swarm · Max"    (max search / batch processing)
+  kimi-k2.6     -> "K2.6 · Fast"       (fast chat, quick replies)
+  kimi-k2       -> "K2.6 · Fast"       (legacy alias; K2 series discontinued 2026-05-25)
 """
 
 import os, sys, json, time, argparse, sqlite3, shutil, re
@@ -20,8 +28,17 @@ from pathlib import Path
 HOME = Path.home()
 DIR = HOME / ".kimi-cli"
 ACCOUNTS_FILE = DIR / "accounts.json"
+PROFILE_DIR = DIR / "chrome-profile"  # Native reusable profile (created by --login)
 BASE = "https://www.kimi.com"
-DEFAULT_MODEL = "kimi-k2"
+DEFAULT_MODEL = "kimi-k3"
+# Maps our slug to the exact label Kimi renders in its model picker.
+# switch_model() MUST click the label, never the slug — the UI has no slug text.
+MODEL_LABELS = {
+    "kimi-k3": "K3 · Max",
+    "kimi-k3-swarm": "K3 Swarm · Max",
+    "kimi-k2.6": "K2.6 · Fast",
+    "kimi-k2": "K2.6 · Fast",  # legacy alias; K2 series discontinued 2026-05-25
+}
 CHROME_SRC = None  # Auto-detected from WSL Windows mount
 
 def _find_chrome_profile():
@@ -150,137 +167,241 @@ def list_accounts():
 # ── browser profile ──────────────────────────────────────
 
 def sync_profile():
-    """Copy Chrome cookies only if newer. Returns profile path."""
+    """Return a usable Chrome profile path for headless runs.
+
+    Priority:
+      1. Native login profile from `kimi.py --login` (preferred — contains a
+         real, send-capable session).
+      2. Fall back to copying Windows Chrome cookies (works only if the
+         Windows session is currently signed in and not DPAPI-locked).
+    """
+    # 1. Native login profile (created by --login) — first choice
+    if _profile_ready():
+        return str(PROFILE_DIR)
+
+    # 2. Fallback: copy Windows Chrome cookies
     chrome_src = _find_chrome_profile()
     if not chrome_src:
         return None
-    
+
     profile_dir = DIR / "chrome-profile"
     profile_dir.mkdir(parents=True, exist_ok=True)
     src_cookies = chrome_src / "Default" / "Cookies"
     mark = profile_dir / ".synced"
-    
+
     if mark.exists() and src_cookies.exists():
         try:
             if src_cookies.stat().st_mtime <= mark.stat().st_mtime:
                 return str(profile_dir)
         except: pass
-    
-    info("Syncing Chrome cookies...")
+
+    info("Syncing Chrome cookies (fallback). For a reliable session, run: kimi.py --login")
     for item in ["Default/Cookies", "Default/Cookies-journal", "Local State"]:
         sp = chrome_src / item; dp = profile_dir / item
         if sp.exists():
             dp.parent.mkdir(parents=True, exist_ok=True)
             try: shutil.copy2(str(sp), str(dp))
             except: pass
-    
+
     mark.touch()
     return str(profile_dir)
 
-# ── Kimi chat via Playwright ──────────────────────────────
+# ── Chrome login helper (headed, reusable profile) ────────
 
-# JS extraction — use DOM selectors instead of fragile body-text parsing
-EXTRACT_JS = """
-() => {
-    // Kimi: assistant messages have specific class patterns
-    // Try multiple selectors for the last assistant response
-    const selectors = [
-        '[class*="message"][class*="assistant"]',
-        '[class*="chat"] [class*="assistant"]',
-        '[data-role="assistant"]',
-        '.chat-item.assistant',
-        '[class*="bot"] [class*="content"]',
-        '[class*="response"]',
-    ];
-    for (const sel of selectors) {
-        const els = document.querySelectorAll(sel);
-        if (els.length > 0) {
-            const text = els[els.length - 1].innerText?.trim();
-            if (text && text.length > 10) return text;
-        }
-    }
-    return '';
-}
-"""
-
-DONE_JS = """
-() => {
-    // Kimi: response is done when the send/stop button state changes.
-    // Multiple detection strategies since Kimi UI changes frequently.
-    const sendBtn = document.querySelector('button[aria-label*="send" i], button[type="submit"], [class*="send-btn"]');
-    const stopBtn = document.querySelector('button[aria-label*="stop" i], [class*="stop-btn"], [class*="stop-generat"]');
-    const loading = document.querySelector('[class*="loading"], [class*="thinking"], [class*="spinner"]');
-    // Done = send/input available + nothing stopping + not loading
-    if (!stopBtn && !loading) return true;
-    // Also check: if we see a "Share" or "Copy" button, response is done
-    const shareBtn = document.querySelector('[aria-label*="share" i], [class*="share"]');
-    const copyBtn = document.querySelector('[aria-label*="copy" i], [class*="copy"]');
-    if ((shareBtn || copyBtn) && !stopBtn) return true;
-    return false;
-}
-"""
-
-
-def extract_response_js(pg):
-    """Extract assistant response using JS DOM selectors."""
+def chrome_login_helper():
+    """Launch HEADED Chrome (DISPLAY=:0) so the user can sign into kimi.com
+    once. Saves the session into our native PROFILE_DIR, which every later
+    headless run reuses. Returns the profile dir path."""
+    import shutil as _shutil
+    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
+    disp = os.environ.get("DISPLAY", ":0")
+    info(f"Launching headed Chrome on DISPLAY={disp}. Sign in to kimi.com, then close the window.")
+    info(f"Profile will be saved at: {PROFILE_DIR}")
     try:
-        text = pg.evaluate(EXTRACT_JS)
-        if text and len(text) > 10:
-            return text
-    except Exception:
-        pass
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(
+                headless=False,
+                executable_path=_resolve_chrome_exe(),
+                args=[
+                    f"--display={disp}",
+                    "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage",
+                    # Don't let Playwright's default automation flags interfere
+                    "--disable-blink-features=AutomationControlled",
+                ],
+            )
+            ctx = browser.new_context(viewport={"width": 1200, "height": 800})
+            pg = ctx.new_page()
+            pg.goto(BASE, wait_until="commit", timeout=45000)
+            # Kimi holds the connection open (persistent WebSocket), so
+            # 'domcontentloaded' never fires — use a fixed settle wait.
+            time.sleep(6)
+            info("Waiting for you to log in (window is open)... press Enter here when done.")
+            try:
+                input("Press ENTER after you have signed in to kimi.com and can chat > ")
+            except EOFError:
+                # Non-interactive: wait a fixed grace period for the user to log in
+                time.sleep(60)
+            # Confirm login by checking for the composer / absence of login wall
+            logged_in = False
+            try:
+                body = pg.locator('body').inner_text()
+                logged_in = "Log in with phone" not in body and "Continue with Google" not in body \
+                            and pg.locator('[contenteditable="true"]').count() > 0
+            except: pass
+            ctx.close(); browser.close()
+            if logged_in:
+                print(f"✓ Logged in. Profile saved at {PROFILE_DIR}")
+                print(f"  Reuse with: python kimi.py \"prompt\"   (auto-detected)")
+                return str(PROFILE_DIR)
+            else:
+                print("⚠ Login not detected. Profile saved but may be incomplete — re-run --login.")
+                return str(PROFILE_DIR)
+    except Exception as e:
+        fail("login-failed", f"Could not launch headed Chrome: {e}")
+
+def _resolve_chrome_exe():
+    """Find a Chrome/Chromium executable to drive headed login."""
+    import shutil as _shutil
+    for cand in ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
+                 "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe"]:
+        found = _shutil.which(cand) or (cand if os.path.exists(cand) else None)
+        if found:
+            return found
+    # Fall back to Playwright's bundled chromium
+    return None
+
+def _profile_ready():
+    """True if our native profile exists with a Cookies db (i.e. --login ran)."""
+    cookies = PROFILE_DIR / "Default" / "Network" / "Cookies"
+    return cookies.exists()
+
+def _safe_close(ctx, pw):
+    """Close Playwright context/process, suppressing the Node.js v24 EPIPE
+    crash that fires on stdout/stderr pipe teardown under PTY/subprocess."""
+    _err_fd = None
+    try:
+        _err_fd = os.dup(2)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 2)
+        os.close(devnull)
+    except: pass
+    try:
+        if ctx: ctx.close()
+    except: pass
+    try:
+        if pw: pw.stop()
+    except: pass
+    if _err_fd is not None:
+        try:
+            os.dup2(_err_fd, 2); os.close(_err_fd)
+        except: pass
+
+def extract_response(pg):
+    """Extract the last Kimi AI response.
+
+    Kimi renders the conversation in a `.layout-content` (`.main`) container.
+    Within it, the structure after a reply is:
+        <prompt>\\nEdit\\nCopy\\nShare\\n<RESPONSE TEXT>\\n\\n\\nAsk anything, or task an agent...
+    So the reply is the text AFTER the last "Share" marker and BEFORE the
+    composer placeholder ("Ask anything"). This is far more reliable than
+    `body.inner_text()` (which mixes in sidebar chat titles) or the
+    `message-list` node (which is virtualized/empty under automation).
+    Falls back to the body-level Share-walk if the container is missing.
+    """
+    try:
+        main = pg.locator('.layout-content, .main').first
+        if main.count():
+            text = main.inner_text()
+        else:
+            text = pg.locator('body').inner_text()
+        lines = text.split('\n')
+        shares = [i for i, l in enumerate(lines) if l.strip() == 'Share']
+        if not shares:
+            return ''
+        start = shares[-1] + 1
+        # Stop at the composer placeholder (excludes the model badge etc.)
+        end = len(lines)
+        for i in range(start, len(lines)):
+            if lines[i].strip().startswith('Ask anything'):
+                end = i
+                break
+        reply = '\n'.join(lines[start:end]).strip()
+        if reply:
+            return reply
+    except: pass
+    return ''
+
+def _current_model(pg):
+    """Read the active model label from the composer badge (e.g. 'K3 · Max')."""
+    try:
+        badge = pg.locator('[class*="model"]').first
+        if badge.count() and badge.is_visible(timeout=1000):
+            return badge.inner_text().strip()
+    except: pass
     return ""
 
-
-def extract_response(body):
-    """Extract last AI response from Kimi page body.
-    
-    Strategy: walk backwards from "Share" marker. Chat history titles 
-    are short (<30 chars). The actual response is longer text.
-    """
-    lines = body.split('\n')
-    share_indices = [i for i, l in enumerate(lines) if l.strip() == 'Share']
-    if not share_indices:
-        return ''
-    
-    last_share = share_indices[-1]
-    
-    # Walk backwards, collect lines until we hit something that's clearly
-    # not a chat history title (short text = sidebar, long text = response)
-    result = []
-    for i in range(last_share - 1, -1, -1):
-        line = lines[i].strip()
-        if not line or line == 'Copy':
-            continue
-        # Long lines are the actual response
-        if len(line) > 40:
-            result.insert(0, line)
-        # Short lines that are NOT UI chrome might be response snippets
-        elif len(line) > 3 and not any(line.startswith(p) for p in ('K2', 'K1', 'Ctrl')):
-            # If we already have long lines, short ones before them are 
-            # likely part of the response (e.g., code blocks, lists)
-            if result:
-                result.insert(0, line)
-            # First short line we encounter — check if it's a chat title
-            elif line not in ('New Chat', 'Chat History', 'All Chats', 'Get App',
-                              'Upgrade', 'Lock Sidebar'):
-                result.insert(0, line)
-        # Stop if we hit obvious sidebar chrome
-        if line in ('New Chat', 'Chat History', 'All Chats') and result:
-            break
-    
-    return '\n'.join(result) if result else ''
-
 def switch_model(pg, model):
-    """Switch Kimi model via UI."""
-    if model == DEFAULT_MODEL: return
-    info(f"Switching model to {model}")
+    """Switch Kimi model via UI. Clicks the exact picker label, not the slug."""
+    label = MODEL_LABELS.get(model, model)
+    if model == DEFAULT_MODEL and _current_model(pg) == MODEL_LABELS.get(DEFAULT_MODEL, DEFAULT_MODEL):
+        return
+    info(f"Switching model to {model} ({label})")
     try:
         pg.locator('[class*="model"]').first.click(); time.sleep(1)
-        pg.locator(f'text="{model}"').first.click(); time.sleep(1)
+        pg.locator(f'text="{label}"').first.click(); time.sleep(1)
+        # Close the picker if it is still open / re-confirm
+        cur = _current_model(pg)
+        if cur and cur != label:
+            # Picker may not have closed; try once more
+            try:
+                pg.locator(f'text="{label}"').first.click(); time.sleep(1)
+            except: pass
+    except Exception as e:
+        info(f"switch_model failed: {e}")
+
+def _set_thinking(pg, want_on: bool):
+    """Toggle Kimi's thinking/reasoning switch (when a toggle control exists)."""
+    try:
+        # Kimi exposes a thinking toggle near the composer; try common labels.
+        for sel in ['button[aria-label*="think" i]', 'button:has-text("Thinking")',
+                    '[class*="think"]']:
+            loc = pg.locator(sel).first
+            if loc.count() and loc.is_visible(timeout=1000):
+                # Heuristic: if it reads ON we leave it; click to flip state.
+                loc.click(); time.sleep(0.5); return
     except: pass
 
-def kimi_chat(prompt, model=DEFAULT_MODEL, conv_url=None, profile_path=None):
+def _attach_files(pg, files):
+    """Attach one or more files/images via Kimi's composer toolkit.
+
+    The composer has a hidden ``input[type=file]`` inside the 'Add files &
+    photos' toolkit item. Clicking the item label is unreliable under headless,
+    but Playwright's ``set_input_files`` works directly on the hidden input.
+    Returns True if at least one attachment chip appeared.
+    """
+    if not files:
+        return False
+    paths = [str(Path(f).resolve()) for f in files if Path(f).exists()]
+    if not paths:
+        return False
+    # Open the toolkit so the input is in the live DOM tree.
+    try:
+        pg.locator('.toolkit-trigger-btn').first.click(timeout=3000); time.sleep(2)
+    except: pass
+    fi = pg.locator('input[type=file]')
+    if fi.count() == 0:
+        return False
+    # Set on every file input (Kimi may present separate doc/image inputs).
+    attached = False
+    for i in range(fi.count()):
+        try:
+            fi.nth(i).set_input_files(paths); time.sleep(2)
+            attached = True
+        except: pass
+    time.sleep(1)
+    return attached
+def kimi_chat(prompt, model=DEFAULT_MODEL, conv_url=None, profile_path=None, thinking=True, files=None):
     from playwright.sync_api import sync_playwright
     
     pw = sync_playwright().start()
@@ -291,66 +412,71 @@ def kimi_chat(prompt, model=DEFAULT_MODEL, conv_url=None, profile_path=None):
             viewport={'width': 1280, 'height': 800},
             args=['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'])
         pg = ctx.pages[0] if ctx.pages else ctx.new_page()
-        
+
         if conv_url:
-            pg.goto(conv_url, wait_until='domcontentloaded', timeout=30000)
+            pg.goto(conv_url, wait_until='commit', timeout=45000)
             time.sleep(6)
         else:
-            pg.goto(BASE, wait_until='domcontentloaded', timeout=30000)
+            pg.goto(BASE, wait_until='commit', timeout=45000)
+            # Kimi holds the connection open (persistent WebSocket); 'domcontentloaded'
+            # never fires. Use a fixed settle wait instead.
             time.sleep(4)
+            # Start a fresh chat so parallel in-flight chats can't block the reply.
+            # The sidebar "New Chat" item is outside the viewport under headless,
+            # so Playwright's .click() times out. Use a JS .click() which works.
+            try:
+                pg.locator('text="New Chat"').first.evaluate("e => e.click()")
+            except:
+                try:
+                    pg.locator('text="New Chat"').first.click(timeout=2000)
+                except: pass
+            time.sleep(2)
             switch_model(pg, model)
-        
+            if not thinking:
+                _set_thinking(pg, False)
+
+        pre_shares = pg.locator('body').inner_text().count('Share')
+
         editor = pg.locator('[contenteditable="true"]').first
         if editor.count() == 0:
             raise Exception("no-input")
-        
-        # Kimi has an animated video background that intercepts pointer events.
-        # Force-click through it, then type.
-        editor.click(force=True); time.sleep(0.5)
+        # Attach files/images before typing the prompt (opens the toolkit,
+        # sets the hidden file input, chip appears in the composer).
+        if files:
+            try:
+                _attach_files(pg, files)
+            except Exception as e:
+                info(f"attach failed: {e}")
+        editor.click(); time.sleep(0.5)
         editor.fill(prompt); time.sleep(0.5)
         editor.press('Enter'); time.sleep(1)
-        
+
         try:
             for sel in ['button[aria-label*="send" i]', 'button[type="submit"]']:
                 btn = pg.locator(sel).first
                 if btn.count() > 0 and btn.is_visible(timeout=1000):
                     btn.click(); time.sleep(0.5); break
         except: pass
-        
+
         text = ""; deadline = time.time() + 180
-        done_at = None
         while time.time() < deadline:
             try:
-                done = pg.evaluate(DONE_JS)
-            except Exception:
-                done = False
-            if done:
-                if done_at is None:
-                    done_at = time.time()
-                text = extract_response_js(pg)
-                # Wait at least 8s after DONE for Kimi's slow streaming
-                if text and len(text) > 20 and (time.time() - done_at) >= 8:
-                    break
-            else:
-                done_at = None
+                body = pg.locator('body').inner_text()
+                if body.count('Share') > pre_shares:
+                    time.sleep(3)
+                    # Primary extractor uses the assistant message container;
+                    # the DOM may still be settling, so retry until stable.
+                    text = extract_response(pg)
+                    if text and len(text) > 2: break
+            except: pass
             time.sleep(0.5)
-            # Hard timeout fallback: after 90s, extract whatever is there
-            if time.time() > deadline - 90 and not text:
-                text = extract_response_js(pg)
-                if text and len(text) > 20:
-                    break
-        
+
         url = pg.url
-        
+
         if not text: raise Exception("empty-response")
         return text, url
     finally:
-        # Clean shutdown to avoid Node.js EPIPE crashes
-        if ctx:
-            try: ctx.close()
-            except: pass
-        try: pw.stop()
-        except: pass
+        _safe_close(ctx, pw)
 
 # ── conversation ─────────────────────────────────────────
 
@@ -367,13 +493,20 @@ def main():
     global _Q
     p = argparse.ArgumentParser()
     p.add_argument("prompt", nargs="*"); p.add_argument("-p", "--prompt-flag")
-    p.add_argument("-m", "--model", default=DEFAULT_MODEL)
+    p.add_argument("-m", "--model", default=DEFAULT_MODEL,
+                   help="Model slug: kimi-k3 (default), kimi-k3-swarm, kimi-k2.6, kimi-k2")
+    p.add_argument("--no-thinking", action="store_true",
+                   help="Disable thinking/reasoning mode (faster).")
+    p.add_argument("-f", "--file", action="append", default=[],
+                   help="Attach a file or image (repeatable). e.g. -f doc.pdf -f pic.png")
     p.add_argument("-c", "--conversation"); p.add_argument("--new", action="store_true")
     p.add_argument("-o", "--output"); p.add_argument("--json", action="store_true")
     p.add_argument("-q", "--quiet", action="store_true")
     p.add_argument("--accounts", action="store_true")
     p.add_argument("--account", help="Account label")
     p.add_argument("--save-all", action="store_true")
+    p.add_argument("--login", action="store_true",
+                   help="Launch HEADED Chrome on DISPLAY=:0 to sign in once; saves a reusable profile.")
     p.add_argument("--set-default", help="Set default account")
     p.add_argument("--remove", help="Remove account")
     p.add_argument("--reset-limits", action="store_true")
@@ -395,6 +528,9 @@ def main():
         else: print(f"'{args.set_default}' not found")
         return
     if args.accounts: list_accounts(); return
+    
+    if args.login:
+        chrome_login_helper(); return
     
     prompt = args.prompt_flag or (" ".join(args.prompt) if args.prompt else None)
     if not prompt and not sys.stdin.isatty(): prompt = sys.stdin.read().strip()
@@ -425,7 +561,7 @@ def main():
         # No saved accounts — just use Chrome profile directly
         info("No saved accounts. Using Chrome profile. Run --save-all for multi-account.")
         try:
-            text, url = kimi_chat(prompt, model=args.model, conv_url=conv_url, profile_path=profile_path)
+            text, url = kimi_chat(prompt, model=args.model, conv_url=conv_url, profile_path=profile_path, thinking=not args.no_thinking, files=args.file)
             result = text
             if args.conversation: conv["url"] = url
         except Exception as e:
@@ -441,7 +577,7 @@ def main():
                 info(f"Skip '{lbl}' (cooldown {int(RATE_COOLDOWN - (time.time() - last))}s)"); continue
             info(f"Try: {lbl}")
             try:
-                text, url = kimi_chat(prompt, model=args.model, conv_url=conv_url, profile_path=profile_path)
+                text, url = kimi_chat(prompt, model=args.model, conv_url=conv_url, profile_path=profile_path, thinking=not args.no_thinking, files=args.file)
                 result = text
                 if args.conversation: conv["url"] = url
                 log("[KIMI:DONE]"); break
