@@ -424,11 +424,15 @@ def kimi_chat(prompt, model=DEFAULT_MODEL, conv_url=None, profile_path=None, thi
             # Start a fresh chat so parallel in-flight chats can't block the reply.
             # The sidebar "New Chat" item is outside the viewport under headless,
             # so Playwright's .click() times out. Use a JS .click() which works.
+            # Also dismiss any modal overlays first.
+            try:
+                pg.keyboard.press('Escape'); time.sleep(0.5)
+            except: pass
             try:
                 pg.locator('text="New Chat"').first.evaluate("e => e.click()")
             except:
                 try:
-                    pg.locator('text="New Chat"').first.click(timeout=2000)
+                    pg.locator('text="New Chat"').first.click(force=True, timeout=3000)
                 except: pass
             time.sleep(2)
             switch_model(pg, model)
@@ -436,6 +440,21 @@ def kimi_chat(prompt, model=DEFAULT_MODEL, conv_url=None, profile_path=None, thi
                 _set_thinking(pg, False)
 
         pre_shares = pg.locator('body').inner_text().count('Share')
+
+        # Dismiss any modal/popup that might intercept pointer events
+        try:
+            modal = pg.locator('.modal-mask, .dialog-mask, [class*="modal"], [class*="dialog"]').first
+            if modal.count() and modal.is_visible(timeout=2000):
+                # Try clicking the close button or pressing Escape
+                try:
+                    close_btn = pg.locator('[class*="close"], [class*="cancel"], button:has-text("Close"), button:has-text("Cancel")').first
+                    if close_btn.count() and close_btn.is_visible(timeout=1000):
+                        close_btn.click(force=True, timeout=2000); time.sleep(1)
+                except: pass
+                try:
+                    pg.keyboard.press('Escape'); time.sleep(1)
+                except: pass
+        except: pass
 
         editor = pg.locator('[contenteditable="true"]').first
         if editor.count() == 0:
@@ -447,7 +466,10 @@ def kimi_chat(prompt, model=DEFAULT_MODEL, conv_url=None, profile_path=None, thi
                 _attach_files(pg, files)
             except Exception as e:
                 info(f"attach failed: {e}")
-        editor.click(); time.sleep(0.5)
+        # Use force=True to bypass video/modal pointer interception (Kimi
+        # sometimes shows promotional videos or modal overlays that block
+        # normal click actionability checks).
+        editor.click(force=True, timeout=5000); time.sleep(0.5)
         editor.fill(prompt); time.sleep(0.5)
         editor.press('Enter'); time.sleep(1)
 
@@ -455,7 +477,7 @@ def kimi_chat(prompt, model=DEFAULT_MODEL, conv_url=None, profile_path=None, thi
             for sel in ['button[aria-label*="send" i]', 'button[type="submit"]']:
                 btn = pg.locator(sel).first
                 if btn.count() > 0 and btn.is_visible(timeout=1000):
-                    btn.click(); time.sleep(0.5); break
+                    btn.click(force=True, timeout=3000); time.sleep(0.5); break
         except: pass
 
         text = ""; deadline = time.time() + 180

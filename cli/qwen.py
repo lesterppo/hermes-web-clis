@@ -32,6 +32,26 @@ import base64
 from datetime import datetime, timezone
 from pathlib import Path
 
+def _safe_close(ctx, pw):
+    """Close Playwright context/process, suppressing the Node.js v24 EPIPE
+    crash that fires on stdout/stderr pipe teardown under PTY/subprocess."""
+    _err_fd = None
+    try:
+        _err_fd = os.dup(2)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 2)
+        os.close(devnull)
+    except: pass
+    try:
+        if ctx: ctx.close()
+    except: pass
+    try:
+        if pw: pw.stop()
+    except: pass
+    if _err_fd is not None:
+        try:
+            os.dup2(_err_fd, 2); os.close(_err_fd)
+        except: pass
 QWEN_HOME = Path.home() / ".qwen-cli"
 QWEN_AUTH_FILE = QWEN_HOME / "auth.json"
 QWEN_BROWSER_PROFILE = QWEN_HOME / "browser-profile"
@@ -54,14 +74,14 @@ def _qwen_server_running() -> bool:
 def _try_qwen_server(prompt: str) -> dict | None:
     if not _qwen_server_running():
         from pathlib import Path
-        server_script = Path(__file__).resolve().parent / "qwen_server.py"
+        server_script = Path(__file__).resolve().parent.parent / "scripts" / "page_server.py"
         if not server_script.exists():
             return None
         import subprocess
         log_path = Path.home() / ".chrome-daemon" / "qwen_server.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         subprocess.Popen(
-            [sys.executable, str(server_script)],
+            [sys.executable, str(server_script), '--platform', 'qwen', '--port', str(_QWEN_SERVER_PORT), '--headed', '--start'],
             stdout=open(log_path, "a"), stderr=open(log_path, "a"),
             start_new_session=True,
         )
@@ -255,7 +275,7 @@ def browser_login():
             args=["--no-sandbox", "--disable-gpu", "--disable-blink-features=AutomationControlled"],
         )
         page = context.pages[0] if context.pages else context.new_page()
-        page.goto("https://chat.qwen.ai/", wait_until="domcontentloaded")
+        page.goto("https://chat.qwen.ai/", wait_until="commit")
         info("Waiting for login...")
         for i in range(300):
             cookies = context.cookies()
@@ -702,9 +722,9 @@ def send_prompt(page, prompt: str, chat_id: str | None = None,
 
     # Navigate
     if chat_id:
-        page.goto(f"{QWEN_BASE_URL}/c/{chat_id}", wait_until="domcontentloaded", timeout=30000)
+        page.goto(f"{QWEN_BASE_URL}/c/{chat_id}", wait_until="commit", timeout=30000)
     else:
-        page.goto(QWEN_BASE_URL, wait_until="domcontentloaded", timeout=30000)
+        page.goto(QWEN_BASE_URL, wait_until="commit", timeout=30000)
     
     # Wait for model to finish loading (Model loading... in sidebar)
     for _ in range(15):

@@ -22,6 +22,26 @@ is stricter, so the clearance expires faster.
 import os, sys, json, time, argparse, sqlite3, shutil
 from pathlib import Path
 
+def _safe_close(ctx, pw):
+    """Close Playwright context/process, suppressing the Node.js v24 EPIPE
+    crash that fires on stdout/stderr pipe teardown under PTY/subprocess."""
+    _err_fd = None
+    try:
+        _err_fd = os.dup(2)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 2)
+        os.close(devnull)
+    except: pass
+    try:
+        if ctx: ctx.close()
+    except: pass
+    try:
+        if pw: pw.stop()
+    except: pass
+    if _err_fd is not None:
+        try:
+            os.dup2(_err_fd, 2); os.close(_err_fd)
+        except: pass
 HOME = Path.home()
 DIR = HOME / ".chatgpt-cli"
 ACCOUNTS_FILE = DIR / "accounts.json"
@@ -39,6 +59,53 @@ def load_accounts():
         try: return json.loads(ACCOUNTS_FILE.read_text())
         except: pass
     return {}
+
+# Page server integration
+_CHATGPT_SERVER_PORT = 9870
+_CHATGPT_PID_FILE = DIR / "server.pid"
+
+def _chatgpt_server_running() -> bool:
+    if not _CHATGPT_PID_FILE.exists(): return False
+    try:
+        os.kill(int(_CHATGPT_PID_FILE.read_text().strip()), 0)
+        import urllib.request
+        urllib.request.urlopen(f"http://127.0.0.1:{_CHATGPT_SERVER_PORT}/health", timeout=1)
+        return True
+    except: return False
+
+def _try_chatgpt_server(prompt: str) -> dict | None:
+    if not _chatgpt_server_running():
+        from pathlib import Path as _Path
+        server_script = _Path(__file__).resolve().parent.parent / "scripts" / "page_server.py"
+        if not server_script.exists():
+            return None
+        import subprocess as _sp
+        log_path = _Path.home() / ".chrome-daemon" / "chatgpt_server.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        _sp.Popen(
+            [sys.executable, str(server_script), '--platform', 'chatgpt', '--port', str(_CHATGPT_SERVER_PORT), '--headed', '--start'],
+            stdout=open(log_path, "a"), stderr=open(log_path, "a"),
+            start_new_session=True,
+        )
+        import time as _time
+        deadline = _time.time() + 30
+        while _time.time() < deadline:
+            if _chatgpt_server_running():
+                break
+            _time.sleep(0.5)
+        if not _chatgpt_server_running():
+            return None
+    try:
+        import urllib.request as _ur
+        data = json.dumps({"prompt": prompt}).encode()
+        req = _ur.Request(f"http://127.0.0.1:{_CHATGPT_SERVER_PORT}/query",
+                          data=data, headers={"Content-Type": "application/json"})
+        with _ur.urlopen(req, timeout=120) as resp:
+            result = json.loads(resp.read())
+            if result.get("ok"): return result
+    except: pass
+    return None
+
 def save_accounts(a):
     DIR.mkdir(parents=True,exist_ok=True)
     ACCOUNTS_FILE.write_text(json.dumps(a,indent=2))
@@ -117,7 +184,7 @@ def browser_login():
             viewport={'width':1280,'height':800},
             args=['--no-sandbox','--disable-gpu','--disable-blink-features=AutomationControlled'])
         pg = ctx.pages[0] if ctx.pages else ctx.new_page()
-        pg.goto(BASE, wait_until='domcontentloaded')
+        pg.goto(BASE, wait_until='commit')
         
         for i in range(600):
             try:
@@ -152,6 +219,12 @@ def extract_response(body, prompt):
     return '\n'.join(lines)
 
 def chatgpt_chat(prompt, model=DEFAULT_MODEL, conv_url=None, profile_path=None):
+    # Try page server first
+    import urllib.request as _ur2, json as _js2
+    result = _try_chatgpt_server(prompt)
+    if result:
+        return result.get("text", ""), ""
+    # Fall back to direct Playwright
     from playwright.sync_api import sync_playwright
     
     with sync_playwright() as pw:
@@ -162,7 +235,7 @@ def chatgpt_chat(prompt, model=DEFAULT_MODEL, conv_url=None, profile_path=None):
         pg = ctx.pages[0] if ctx.pages else ctx.new_page()
         
         url = conv_url or BASE
-        pg.goto(url, wait_until='domcontentloaded', timeout=20000)
+        pg.goto(url, wait_until='commit', timeout=20000)
         time.sleep(6)
         
         title = pg.title()

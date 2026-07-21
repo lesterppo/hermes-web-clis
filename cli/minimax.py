@@ -14,6 +14,26 @@ import os, sys, json, time, argparse, textwrap, sqlite3, shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
+def _safe_close(ctx, pw):
+    """Close Playwright context/process, suppressing the Node.js v24 EPIPE
+    crash that fires on stdout/stderr pipe teardown under PTY/subprocess."""
+    _err_fd = None
+    try:
+        _err_fd = os.dup(2)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 2)
+        os.close(devnull)
+    except: pass
+    try:
+        if ctx: ctx.close()
+    except: pass
+    try:
+        if pw: pw.stop()
+    except: pass
+    if _err_fd is not None:
+        try:
+            os.dup2(_err_fd, 2); os.close(_err_fd)
+        except: pass
 MINIMAX_HOME = Path.home() / ".minimax-cli"
 MINIMAX_AUTH_FILE = MINIMAX_HOME / "auth.json"
 MINIMAX_BROWSER_PROFILE = MINIMAX_HOME / "browser-profile"
@@ -44,14 +64,14 @@ def _try_server_query(prompt: str) -> dict | None:
     if not _server_running():
         # Auto-launch the server on demand
         from pathlib import Path
-        server_script = Path(__file__).resolve().parent / "minimax_server.py"
+        server_script = Path(__file__).resolve().parent.parent / "scripts" / "page_server.py"
         if not server_script.exists():
             return None
         import subprocess
         log_path = Path.home() / ".chrome-daemon" / "minimax_server.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         subprocess.Popen(
-            [sys.executable, str(server_script)],
+            [sys.executable, str(server_script), '--platform', 'minimax', '--port', str(_MINIMAX_SERVER_PORT), '--headed', '--start'],
             stdout=open(log_path, "a"), stderr=open(log_path, "a"),
             start_new_session=True,
         )
@@ -141,7 +161,7 @@ def browser_login():
             viewport={"width":1280,"height":800},
             args=["--no-sandbox","--disable-gpu","--disable-blink-features=AutomationControlled"])
         pg = ctx.pages[0] if ctx.pages else ctx.new_page()
-        pg.goto(MINIMAX_BASE_URL, wait_until="domcontentloaded")
+        pg.goto(MINIMAX_BASE_URL, wait_until="commit")
         info("Waiting for login...")
         for i in range(300):
             cks = ctx.cookies()
@@ -276,9 +296,9 @@ def send_prompt(pg, prompt, model=MINIMAX_DEFAULT_MODEL, thinking=True, conv_url
     _block_slow(pg)
     
     if conv_url:
-        pg.goto(conv_url, wait_until="domcontentloaded", timeout=30000)
+        pg.goto(conv_url, wait_until="commit", timeout=30000)
     else:
-        pg.goto(MINIMAX_BASE_URL, wait_until="domcontentloaded", timeout=30000)
+        pg.goto(MINIMAX_BASE_URL, wait_until="commit", timeout=30000)
     
     # Smart wait: wait for editor instead of fixed sleep(6)
     try:

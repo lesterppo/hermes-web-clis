@@ -26,6 +26,26 @@ Agent-native output (use -o flag):
 import os, sys, json, time, argparse, sqlite3, shutil, re
 from pathlib import Path
 
+def _safe_close(ctx, pw):
+    """Close Playwright context/process, suppressing the Node.js v24 EPIPE
+    crash that fires on stdout/stderr pipe teardown under PTY/subprocess."""
+    _err_fd = None
+    try:
+        _err_fd = os.dup(2)
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, 2)
+        os.close(devnull)
+    except: pass
+    try:
+        if ctx: ctx.close()
+    except: pass
+    try:
+        if pw: pw.stop()
+    except: pass
+    if _err_fd is not None:
+        try:
+            os.dup2(_err_fd, 2); os.close(_err_fd)
+        except: pass
 HOME = Path.home()
 DIR = HOME / ".grok-cli"
 AUTH_FILE = DIR / "auth.json"
@@ -288,6 +308,19 @@ def send_prompt(page, prompt, model=MODEL_FAST):
                     pass
     
     if input_el is None:
+        # Transient page load issue — retry once after waiting
+        time.sleep(3)
+        for sel in ['[contenteditable="true"]', '[role="textbox"]', '.ProseMirror', 'textarea']:
+            el = page.locator(sel).first
+            if el.count() > 0:
+                try:
+                    el.wait_for(state="visible", timeout=5000)
+                    input_el = el
+                    is_tiptap = (sel != 'textarea')
+                    break
+                except Exception:
+                    pass
+    if input_el is None:
         fail("no-input", "Cannot find input element on grok.com")
     
     # Type the prompt
@@ -386,7 +419,7 @@ def run_browser_login():
             args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
         )
         page = context.pages[0] if context.pages else context.new_page()
-        page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30000)
+        page.goto(BASE_URL, wait_until="commit", timeout=30000)
         time.sleep(3)
         
         log("Waiting for login... (timeout: 10 minutes)")
@@ -439,9 +472,9 @@ def grok_chat(prompt, model=MODEL_FAST, conv_file=None, fresh=False):
         log("Loading grok.com...")
         
         if conv.get("url") and not fresh:
-            page.goto(conv["url"], wait_until="domcontentloaded", timeout=30000)
+            page.goto(conv["url"], wait_until="commit", timeout=30000)
         else:
-            page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30000)
+            page.goto(BASE_URL, wait_until="commit", timeout=30000)
         
         time.sleep(8)
         dismiss_modals(page)
@@ -459,7 +492,7 @@ def grok_chat(prompt, model=MODEL_FAST, conv_file=None, fresh=False):
             time.sleep(2)
         
         if not logged_in:
-            page.goto(BASE_URL, wait_until="domcontentloaded", timeout=30000)
+            page.goto(BASE_URL, wait_until="commit", timeout=30000)
             time.sleep(8)
             dismiss_modals(page)
             time.sleep(2)
