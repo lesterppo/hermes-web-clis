@@ -49,6 +49,12 @@ class BaseDriver:
     def launch(self):
         """Launch Chromium and navigate to platform."""
         from playwright.sync_api import sync_playwright
+        # Auto-clean stale SingletonLock from previous crashed instances
+        for lock in ['SingletonLock', 'SingletonCookie', 'SingletonSocket']:
+            lp = self.profile_dir / lock
+            if lp.exists():
+                try: lp.unlink()
+                except: pass
         self.pw = sync_playwright().start()
         self.context = self.pw.chromium.launch_persistent_context(
             str(self.profile_dir),
