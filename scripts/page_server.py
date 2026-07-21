@@ -166,7 +166,9 @@ class ChatGPTDriver(BaseDriver):
                 'textarea[placeholder*="Message"]', '[contenteditable="true"]']
     
     def _logout_phrases(self):
-        return ['log in', 'sign up', 'get started']
+        # ChatGPT shows "Log in" in sidebar even when authenticated.
+        # Check for the unauthenticated landing page instead.
+        return ['Get started', 'Create account', 'Sign up for ChatGPT']
     
     def _wait_ready(self, timeout=45):
         """ChatGPT needs extra time for Cloudflare Turnstile + textarea render."""
