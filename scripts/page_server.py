@@ -199,20 +199,15 @@ class ChatGPTDriver(BaseDriver):
             if 'Just a moment' in pg.title():
                 return {"ok": False, "err": "cloudflare", "msg": "Cloudflare Turnstile stuck"}
         
-        # ChatGPT's textarea: may not pass Playwright's visibility check.
-        # Use JS evaluate to bypass visibility requirements.
-        textarea = pg.locator('textarea').first
-        if textarea.count() == 0:
-            return {"ok": False, "err": "no-input", "msg": "Chat input not found"}
-        
-        try:
-            textarea.evaluate("e => { e.focus(); e.value = ''; }")
-            time.sleep(0.5)
-            pg.keyboard.type(prompt, delay=30)
-            time.sleep(0.5)
-            pg.keyboard.press('Enter')
-        except Exception as e:
-            return {"ok": False, "err": "input-error", "msg": str(e)[:200]}
+        # ChatGPT: textarea often fails Playwright visibility check.
+        # Use mouse click + keyboard — proven to work in headed mode.
+        pg.keyboard.press('Escape')
+        time.sleep(0.5)
+        pg.mouse.click(640, 600)
+        time.sleep(2)
+        pg.keyboard.type(prompt, delay=30)
+        time.sleep(0.5)
+        pg.keyboard.press('Enter')
         
         # Wait for response
         time.sleep(2)
@@ -294,41 +289,27 @@ class QwenDriver(BaseDriver):
         time.sleep(0.3)
         textbox.press('Enter')
         
-        # Wait for response — Qwen uses Stop/Copy button pattern
+        # Wait for response — assistant message element appears
         deadline = time.time() + 120
+        response_text = ""
         while time.time() < deadline:
-            stop_btns = pg.locator('button:has-text("Stop"), button:has-text("停止")')
-            copy_btns = pg.locator('button:has-text("Copy"), button:has-text("复制")')
-            
-            stop_visible = False
-            try:
-                if stop_btns.count() > 0:
-                    stop_visible = stop_btns.first.is_visible()
-            except: pass
-            
-            copy_visible = False
-            try:
-                if copy_btns.count() > 0:
-                    copy_visible = copy_btns.first.is_visible()
-            except: pass
-            
-            if not stop_visible and copy_visible:
+            assistant = pg.locator('[class*="assistant"]')
+            if assistant.count() > 0:
                 time.sleep(2)
-                break
-            
-            if not stop_visible and time.time() - deadline + 120 > 15:
-                time.sleep(1)
-                try:
-                    if stop_btns.count() == 0 or not stop_btns.first.is_visible():
-                        break
-                except: pass
-            
+                text = assistant.last.inner_text().strip()
+                if len(text) > 5:
+                    response_text = text
+                    break
             time.sleep(1)
         
-        # Extract last assistant response
-        response = self._extract_qwen_response(pg)
-        if response:
-            return {"ok": True, "text": response, "model": self.get_model()}
+        if response_text:
+            # Strip "Thinking completed" prefix and any status text before the actual answer
+            parts = response_text.split('Thinking completed')
+            response_text = parts[-1].strip() if len(parts) > 1 else response_text.strip()
+            # Also strip any leading status lines
+            lines = response_text.split('\n')
+            response_text = '\n'.join(l for l in lines if not l.startswith('Considering') and not l.startswith('Skip'))
+            return {"ok": True, "text": response_text.strip(), "model": self.get_model()}
         
         return {"ok": False, "err": "empty-response", "msg": "No response extracted"}
     
@@ -382,31 +363,34 @@ class MinimaxDriver(BaseDriver):
         try:
             editor.click(force=True, timeout=5000)
             time.sleep(0.5)
-            # MiniMax TipTap: use keyboard.type for rich text editor
-            pg.keyboard.type(prompt, delay=10)
+            pg.keyboard.type(prompt, delay=20)
             time.sleep(0.5)
             pg.keyboard.press('Enter')
         except Exception as e:
             return {"ok": False, "err": "input-error", "msg": str(e)[:200]}
         
-        # Wait for response
+        # Wait for response — MiniMax uses [class*="message-animate-in"] divs
         deadline = time.time() + 120
+        response_text = ""
         while time.time() < deadline:
             try:
-                # Check for response elements
-                content = pg.locator('.matrix-markdown, [class*="message-content"]')
-                if content.count() > 0:
+                msgs = pg.locator('[class*="message-animate-in"]')
+                if msgs.count() >= 2:  # At least user + assistant messages
                     time.sleep(2)
-                    # Get the last assistant message
-                    texts = []
-                    for i in range(content.count()):
-                        t = content.nth(i).inner_text().strip()
-                        if len(t) > 20:
-                            texts.append(t)
-                    if texts:
-                        return {"ok": True, "text": texts[-1], "model": self.get_model()}
+                    # Last message-animate-in should be the assistant response
+                    text = msgs.last.inner_text().strip()
+                    # Filter out "Thought N time(s)" prefix and trailing timestamp
+                    import re
+                    text = re.sub(r'^Thought\s+\d+\s+time\(s\)\s*', '', text)
+                    text = re.sub(r'\n+\d{2}:\d{2}\s*$', '', text)  # Timestamp
+                    if len(text) > 3:
+                        response_text = text
+                        break
             except: pass
             time.sleep(1)
+        
+        if response_text:
+            return {"ok": True, "text": response_text, "model": self.get_model()}
         
         return {"ok": False, "err": "timeout", "msg": "Response timeout"}
 
